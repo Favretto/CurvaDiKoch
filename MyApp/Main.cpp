@@ -22,7 +22,8 @@
 NOTIFYICONDATA nid = { 0 };         // Aggiunto: struttura per l’icona di notifica
 #define TRAY_ICON_ID 1              // Per icona sulla TNR
 
-#define BTN_SAMPLE_BTN 1
+#define BTN_REDRAW_BTN 1
+#define IDC_SEG_LEN = 200
 
 #define IDM_FILE_EXIT  101
 #define IDM_WINVER 102
@@ -35,12 +36,18 @@ NOTIFYICONDATA nid = { 0 };         // Aggiunto: struttura per l’icona di noti
 
 #define IDM_OPEN_GUI 200
 
-// 1.Timer ogni 500 ms
+// 1.Timer ogni 500 ms.............................
 #define IDT_CLOCK_TIMER 5001
 
 WCHAR szTempPath[MAX_PATH];
 
 HWND hLabel = NULL;
+
+HWND hLabelIterations = NULL;
+HWND hLabelSegmentLength = NULL;
+
+HWND hComboBox = NULL;
+HWND hSegLen = NULL;
 HWND hLabelDateTime = NULL;
 HWND hwnd = NULL;
 
@@ -54,18 +61,13 @@ BOOL MinimizeOnTNR = FALSE;
 
 HANDLE hMutex = NULL;
 
-// Fattore di ingrandimento ...
-double scale = 1.5;
-
-// Dati e costanti
-double D[12], R[12], Cc[7], Ss[7];
-double X = 60, Y = 70;
-int A = 1, L = 1;
-
 // Prototipi
-void DrawKoch(HDC hdc);
+void DrawKoch(HDC hdc, int Def, double SegLen);
 void SubRec(HDC hdc);
 void SubDL(HDC hdc);
+
+int nDef = 4;
+double dSegLen = 185;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
@@ -81,10 +83,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         SelectObject(hdc, pen);
         SetBkColor(hdc, RGB(0, 0, 128));
         SetBkMode(hdc, OPAQUE);
+        
+        DWORD start = GetTickCount();
+        DrawKoch(hdc, nDef, dSegLen);
+        DWORD end = GetTickCount();
+        DWORD DiffTicks = end - start;
+        if(DiffTicks == 0)
+            SetWindowText(hLabel, L"SNOW FLAKE DI HELGE VON KOCH (<15 ms)");
+        else {
+            wchar_t buffer[128];
+            swprintf(buffer, 128, L"SNOW FLAKE DI HELGE VON KOCH (%d ms)", (end - start));
+            SetWindowText(hLabel, buffer);
+        }
 
-        DrawKoch(hdc);
-
-        DeleteObject(pen);
+        //DeleteObject(pen);
         EndPaint(hwnd, &ps);
     }
     
@@ -140,9 +152,33 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
-        case BTN_SAMPLE_BTN:
-            MessageBox(hwnd, L"Intercettato evento CLICK!", L"Bottone premuto ...", MB_OK | MB_ICONINFORMATION);
-            break;
+        case BTN_REDRAW_BTN:{
+            wchar_t buffer[128];  // buffer per il testo
+
+            // Elemento selezionato in hComboBox ...
+            int selIndex = (int)SendMessage(hComboBox, CB_GETCURSEL, 0, 0);
+            
+            if (selIndex != CB_ERR) {
+                SendMessage(hComboBox, CB_GETLBTEXT, selIndex, (LPARAM)buffer);
+                nDef = _wtoi(buffer);
+
+                // Leggo anche la lunghezza segmento ...
+                GetWindowText(hSegLen, buffer, 128);
+                dSegLen = _wtof(buffer);
+                
+                // FORZO IL RIDISEGNO ...
+                //DWORD start = GetTickCount();
+                InvalidateRect(hwnd, NULL, TRUE);
+                UpdateWindow(hwnd);
+                //DWORD end = GetTickCount();
+
+                //wchar_t buffer[128];
+                //swprintf(buffer, 128, L"SNOW FLAKE DI HELGE VON KOCH (%.3f ms)", (end - start));
+
+                //SetWindowText(hLabel, buffer);
+            }
+        }
+        break;
 
         case IDM_FILE_EXIT:
             SendMessage(hwnd, WM_CLOSE, 0, 0);
@@ -227,10 +263,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         HDC hdcStatic = (HDC)wParam;
         HWND hwndCtrl = (HWND)lParam;
 
-        if (hwndCtrl == hLabel)  { // Gestione Label Header
+        if (hwndCtrl == hLabel || hwndCtrl == hLabelIterations || hwndCtrl == hLabelSegmentLength)  { // Gestione Label Header
             SetTextColor(hdcStatic, RGB(192, 125, 0));      // COLORE FOREGROUND
             SetBkMode(hdcStatic, RGB(0, 0, 0));             // COLORE BACKGROUND
-            return (INT_PTR)GetStockObject(BLACK_BRUSH);
+            return (INT_PTR) GetStockObject(BLACK_BRUSH);
         }
         
         break;
@@ -243,12 +279,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         ScreenToClient(hwnd, &pt);
         HWND hCwfp = ChildWindowFromPoint(hwnd, pt);
 
-        if (hCwfp == GetDlgItem(hwnd, BTN_SAMPLE_BTN))// ||
-            //hCwfp == GetDlgItem(hwnd, BTN_SAMPLE_BT2) ||
-            //hCwfp == GetDlgItem(hwnd, BTN_SAMPLE_BT3) ||
-            //hCwfp == GetDlgItem(hwnd, ...)
-            //)
-        {
+        if (hCwfp == GetDlgItem(hwnd, BTN_REDRAW_BTN)) {
             SetCursor(LoadCursor(NULL, IDC_HAND));
             return TRUE; // messaggio gestito
         }
@@ -303,69 +334,78 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
-void DrawKoch(HDC hdc)
+// Dati e costanti
+double adD[12], adCc[7], adSs[7];
+double dX = 60, dY = 70;
+
+int anR[12];
+int nA = 1, nL = 1;
+
+void DrawKoch(HDC hdc, int Def, double SegLen)
 {
-    D[2] = 110;
-    R[2] = 4;
-    X = 230 / scale; // POSIZIONE ORIZZONATALE
-    Y = 190 / scale; // POSIZIONE VERTICALE
-    A = 1;
-    L = 1;
+    adD[2] = SegLen; // 185; // default: 110 - Zoom (lunghezza iniziale lato)
+    anR[2] = Def; // 4
+
+    dX = 230;    // POSIZIONE ORIZZONATALE
+    dY = 190;    // POSIZIONE VERTICALE
+    nA = 1;
+    nL = 1;
 
     // precalcolo sin e cos ...
     for (int i = 0; i <= 5; ++i) {
-        Cc[i + 1] = cos(i * PI / 3);
-        Ss[i + 1] = sin(i * PI / 3);
+        adCc[i + 1] = cos(i * PI / 3);
+        adSs[i + 1] = sin(i * PI / 3);
     }
 
     SubRec(hdc);
-    A -= 2;
+    nA -= 2;
     SubRec(hdc);
-    A -= 2;
+    nA -= 2;
     SubRec(hdc);
+    //}
 }
 
 // --- Subroutine ---
 void SubRec(HDC hdc)
 {
-    int R1 = 0;
-    L++;
-    if (R[(int)L] == 1) R1 = 1;
-    if (R1 == 1)
+    int nR1 = 0;
+    nL++;
+    if (anR[nL] == 1) nR1 = 1;
+    if (nR1 == 1)
     {
-        L--;
+        nL--;
         SubDL(hdc);
         return;
     }
 
-    R[(int)L + 1] = R[(int)L] - 1;
-    D[(int)L + 1] = D[(int)L] / 3.0;
+    anR[nL + 1] = anR[nL] - 1;
+    adD[nL + 1] = adD[nL] / 3.0;
 
     SubRec(hdc);
-    A++;
+    nA++;
     SubRec(hdc);
-    A -= 2;
+    nA -= 2;
     SubRec(hdc);
-    A++;
+    nA++;
     SubRec(hdc);
-    L--;
+    nL--;
 }
 
 // --- Subroutine ---
 void SubDL(HDC hdc)
 {
-    double XL = X;
-    double YL = Y;
+    double dXL = dX;
+    double dYL = dY;
 
-    A += 6;
-    while (A >= 6)
-        A -= 6;
+    nA += 6;
+    while (nA >= 6)
+        nA -= 6;
 
-    X = X + D[(int)L + 1] * Cc[A + 1];
-    Y = Y - D[(int)L + 1] * Ss[A + 1];  // invertito asse Y per GDI
+    dX = dX + adD[nL + 1] * adCc[nA + 1];
+    dY = dY - adD[nL + 1] * adSs[nA + 1];  // invertito asse Y per GDI
 
-    MoveToEx(hdc, (int)(XL * scale), (int)(YL * scale), NULL);
-    LineTo(hdc, (int)(X * scale), (int)(Y * scale));
+    MoveToEx(hdc, (int)(dXL), (int)(dYL), NULL);
+    LineTo(hdc, (int)(dX), (int)(dY));
 }
 
 BOOL is64Bit() {
@@ -496,13 +536,77 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     lstrcpy(nid.szTip, L"Fract - Doppio-click per ripristinare");
 
-    // Label Exmple
+    // Combobox assegnazione ...
+    hComboBox = CreateWindowEx(
+        0,
+        L"COMBOBOX",
+        NULL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        10, 80, 100, 100,
+        hwnd,
+        NULL,
+        hInstance,
+        NULL
+    );
+
+    // Aggiungi elementi alla ComboBox ...
+    // SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"0"); // SEGMENTO
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"1"); // TRIANGOLO
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"2"); // STELLA
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"3");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"4"); // Default 8 Bit BASIC example
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"5");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"6");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"7");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"8");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"9");
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"10"); // 6
+    SendMessage(hComboBox, CB_ADDSTRING, 0, (LPARAM)L"11");
+
+    // Imposta valore di default (es. il secondo elemento: "20")
+    SendMessage(hComboBox, CB_SETCURSEL, 3, 0); // indice 0-based
+ 
+    // Textbox che accetta solo numeri interi ...
+    hSegLen = CreateWindowEx(
+        0,
+        L"EDIT",
+        L"185",  // testo iniziale
+        WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
+        10, 144, 100, 25,
+        hwnd,
+        (HMENU)1001,
+        hInstance,
+        NULL
+    );
+
+    // Valore di default ...
+    // SetWindowText(hEditInt, L"10");
+
+    // Labels varie ...
     hLabel = CreateWindowEx(
         0,
         L"STATIC",
-        L"CURVA DI HELGE VON KOCH",
+        L"SNOW FLAKE DI HELGE VON KOCH",
         WS_CHILD | WS_VISIBLE | SS_CENTER,
         10, 10, 600, 20,       // posizione e dimensione
+        hwnd, NULL, hInstance, NULL
+    );
+
+    hLabelIterations = CreateWindowEx(
+        0,
+        L"STATIC",
+        L"Iterazioni",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        10, 55, 110, 20,       // posizione e dimensione
+        hwnd, NULL, hInstance, NULL
+    );
+
+    hLabelSegmentLength = CreateWindowEx(
+        0,
+        L"STATIC",
+        L"Lung. Iniziale",
+        WS_CHILD | WS_VISIBLE | SS_CENTER,
+        10, 120, 110, 20,       // posizione e dimensione
         hwnd, NULL, hInstance, NULL
     );
 
@@ -517,10 +621,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     );
     
     // Pulsanti
-    CreateWindowEx(0, L"BUTTON", L"CLICK ME!",
+    CreateWindowEx(0, L"BUTTON", L"RE-DRAW!",
         WS_CHILD | WS_VISIBLE,
         175, 330, 250, 30,
-        hwnd, (HMENU)BTN_SAMPLE_BTN, hInstance, NULL);
+        hwnd, (HMENU)BTN_REDRAW_BTN, hInstance, NULL);
 
     //HFONT hFont = (HFONT) GetStockObject(DEFAULT_GUI_FONT);
     HFONT hFont = CreateFontW(
@@ -528,7 +632,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         0,                  // larghezza carattere (0 = proporzionale)
         0, 0,               // angolo escapement e orientamento
         FW_NORMAL,          // spessore (FW_BOLD per grassetto)
-        TRUE, FALSE, FALSE,// italic, underline, strikeout
+        TRUE, FALSE, FALSE, // italic, underline, strikeout
         ANSI_CHARSET,       // charset
         OUT_DEFAULT_PRECIS,
         CLIP_DEFAULT_PRECIS,
